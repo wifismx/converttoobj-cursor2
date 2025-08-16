@@ -1,15 +1,15 @@
 # NRW 3D Model Generator
 
-Ein Python-Tool zur automatischen Generierung wasserdichter 3D-Modelle im OBJ-Format aus Geodaten des Geoportals NRW.
+Ein Python-Tool zur automatischen Generierung wasserdichter 3D-Modelle im OBJ-Format aus Geodaten des OpenGeoData NRW Portals.
 
 ## Features
 
-- ✅ Automatischer Download von Geodaten aus dem Geoportal NRW
+- ✅ Automatischer Download von Geodaten aus OpenGeoData NRW
 - ✅ LOD2 Gebäudedaten (CityGML) Integration
-- ✅ Digitales Geländemodell (DGM) Verarbeitung
+- ✅ Digitales Geländemodell (DGM1) Verarbeitung
 - ✅ OpenStreetMap Datenintegration (Straßen, Gewässer, Vegetation)
 - ✅ Exakte Bounding-Box Zuschneidung
-- ✅ Reprojektion nach EPSG:25832 (ETRS89 / UTM zone 32N)
+- ✅ Koordinatensystem EPSG:25832 (ETRS89 / UTM zone 32N)
 - ✅ Wasserdichte 3D-Modell-Generierung
 - ✅ OBJ-Export für 3D-Druck und Visualisierung
 
@@ -50,17 +50,25 @@ pip install -r requirements.txt
 
 ## Verwendung
 
+### Koordinaten-Konvertierung
+
+Das Tool erwartet Koordinaten im System **EPSG:25832** (UTM Zone 32N). Wenn Sie WGS84-Koordinaten (Länge/Breite) haben, nutzen Sie das Konvertierungsskript:
+
+```bash
+# Konvertiere WGS84 Bounding Box zu EPSG:25832
+python convert_coordinates.py "6.448572,51.667549,6.46076,51.675108"
+
+# Konvertiere einzelnen Punkt mit 500m Radius
+python convert_coordinates.py "6.95,50.94" --expand 500
+```
+
 ### Grundlegende Verwendung
 
 ```bash
+# Mit EPSG:25832 Koordinaten
 python nrw_3d_generator.py "min_x,min_y,max_x,max_y"
-```
 
-Die Bounding Box muss im Koordinatensystem EPSG:25832 angegeben werden.
-
-### Beispiel für Köln Dom Umgebung
-
-```bash
+# Beispiel für Köln Dom Umgebung
 python nrw_3d_generator.py "356800,5645200,357800,5646200" -o koeln_dom.obj
 ```
 
@@ -101,9 +109,13 @@ python nrw_3d_generator.py --config config.json
 
 Das Tool bezieht Daten automatisch von folgenden Quellen:
 
-### Geoportal NRW
-- **Digitales Geländemodell (DGM)**: WCS-Service für Höhendaten
-- **3D-Gebäudemodelle (LOD2)**: WFS-Service für CityGML-Gebäudedaten
+### OpenGeoData NRW (https://www.opengeodata.nrw.de)
+- **Digitales Geländemodell (DGM1)**: 1m Auflösung, XYZ-Format
+  - Kacheln: 1km x 1km
+  - Format: `dgm1_32{xxx}_{yyyy}_1_nw.xyz`
+- **3D-Gebäudemodelle (LOD2)**: CityGML Format
+  - Kacheln: 1km x 1km  
+  - Format: `LoD2_32{xxx}_{yyyy}_1_NW.gml`
 
 ### OpenStreetMap (via Overpass API)
 - **Straßen**: Alle Straßentypen mit automatischer Breitenerkennung
@@ -113,12 +125,12 @@ Das Tool bezieht Daten automatisch von folgenden Quellen:
 ## Verarbeitungsphasen
 
 ### Phase 1: Datendownload
-- Download der Geländedaten (GeoTIFF)
+- Download der Geländedaten (XYZ → GeoTIFF)
 - Download der Gebäudedaten (CityGML)
 - Download der OSM-Daten (GeoJSON)
 
 ### Phase 2: Datenverarbeitung
-- Reprojektion aller Daten nach EPSG:25832
+- Koordinatentransformation nach EPSG:25832
 - Clipping auf die exakte Bounding Box
 - CityGML zu OBJ Konvertierung
 
@@ -160,12 +172,13 @@ Das Tool generiert:
 2. **Terrain-Auflösung**: Höhere Werte (2-5m) für größere Gebiete
 3. **Vereinfachung**: Das Tool vereinfacht automatisch Meshes über 500.000 Faces
 4. **Performance**: Nutzen Sie `--skip-download` für wiederholte Verarbeitung
+5. **Koordinaten**: Verwenden Sie das Konvertierungsskript für WGS84-Koordinaten
 
 ## Fehlerbehebung
 
 ### "Keine Daten gefunden"
 - Überprüfen Sie, ob die Bounding Box in NRW liegt
-- Koordinaten müssen in EPSG:25832 sein
+- Koordinaten müssen in EPSG:25832 sein (nutzen Sie `convert_coordinates.py`)
 
 ### "Mesh nicht wasserdicht"
 - Erhöhen Sie die `--foundation-depth`
@@ -175,11 +188,23 @@ Das Tool generiert:
 - Verkleinern Sie die Bounding Box
 - Erhöhen Sie die Terrain-Auflösung
 
+### "IndexError bei Mesh-Erstellung"
+- Das Tool hat Fallback-Mechanismen für fehlerhafte Meshes
+- Versuchen Sie eine andere Bounding Box
+
 ## Beispiel-Koordinaten (EPSG:25832)
 
-- **Köln Dom**: 356800,5645200,357800,5646200
-- **Düsseldorf Altstadt**: 338500,5678500,339500,5679500
-- **Bonn Zentrum**: 365000,5620000,366000,5621000
+- **Köln Dom**: 356300,5644700,357300,5645700 (1km²)
+- **Düsseldorf Altstadt**: 338000,5678000,339000,5679000 (1km²)
+- **Bonn Zentrum**: 364500,5619500,365500,5620500 (1km²)
+- **Aachen Dom**: 293500,5629500,294500,5630500 (1km²)
+- **Münster Dom**: 403500,5756500,404500,5757500 (1km²)
+
+Für kleinere Bereiche (500m x 500m):
+```bash
+# Köln Dom (500m Radius)
+python nrw_3d_generator.py "356550,5644950,357050,5645450"
+```
 
 ## Lizenz
 
@@ -188,6 +213,13 @@ MIT License - Siehe LICENSE Datei
 ## Beiträge
 
 Beiträge sind willkommen! Bitte erstellen Sie einen Pull Request oder öffnen Sie ein Issue.
+
+## Bekannte Einschränkungen
+
+- Die Verfügbarkeit von LOD2-Gebäudedaten variiert je nach Region
+- DGM1-Daten sind nur für NRW verfügbar
+- Große Bereiche (>10 km²) können zu Speicherproblemen führen
+- OSM-Daten können unvollständig sein
 
 ## Kontakt
 

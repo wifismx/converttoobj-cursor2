@@ -17,14 +17,17 @@ import rasterio
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 import numpy as np
+import zipfile
+import io
+from pyproj import Transformer
 
 
 class DataDownloader:
     """Download-Manager für NRW Geoportal Daten"""
     
-    # WFS/WCS Endpoints für NRW Geoportal
-    WCS_TERRAIN_URL = "https://www.wcs.nrw.de/geobasis/wcs_nw_dgm"
-    WFS_BUILDINGS_URL = "https://www.wfs.nrw.de/geobasis/wfs_nw_3d-gebaeudemodell_lod2"
+    # OpenGeoData NRW URLs
+    LOD2_BASE_URL = "https://www.opengeodata.nrw.de/produkte/geobasis/3dg/lod2_gml/lod2_gml/"
+    DGM_BASE_URL = "https://www.opengeodata.nrw.de/produkte/geobasis/hm/dgm1_xyz/dgm1_xyz/"
     
     # Overpass API für OSM Daten
     OVERPASS_URL = "https://overpass-api.de/api/interpreter"
@@ -46,7 +49,7 @@ class DataDownloader:
     
     def download_terrain(self, bbox: Tuple[float, float, float, float]) -> Path:
         """
-        Lädt DGM (Digitales Geländemodell) vom WCS Service
+        Lädt DGM (Digitales Geländemodell) von OpenGeoData NRW
         
         Args:
             bbox: (min_x, min_y, max_x, max_y) in EPSG:25832
@@ -58,42 +61,177 @@ class DataDownloader:
         
         output_file = self.terrain_dir / "gelaende.tif"
         
-        # WCS GetCoverage Request Parameter
-        params = {
-            'SERVICE': 'WCS',
-            'VERSION': '2.0.1',
-            'REQUEST': 'GetCoverage',
-            'COVERAGEID': 'nw_dgm',  # DGM1 für NRW
-            'FORMAT': 'image/tiff',
-            'SUBSET': f'x({bbox[0]},{bbox[2]})',
-            'SUBSETTINGCRS': 'http://www.opengis.net/def/crs/EPSG/0/25832',
-            'OUTPUTCRS': 'http://www.opengis.net/def/crs/EPSG/0/25832'
-        }
+        # Berechne Kacheln die benötigt werden (1km x 1km Kacheln)
+        tiles = self._calculate_dgm_tiles(bbox)
         
-        # Y-Achse separat hinzufügen
-        url = f"{self.WCS_TERRAIN_URL}?{urlencode(params)}&SUBSET=y({bbox[1]},{bbox[3]})"
+        if not tiles:
+            self.logger.warning("Keine DGM-Kacheln für diese Bounding Box gefunden")
+            return self._create_synthetic_terrain(bbox, output_file)
+        
+        # Lade alle benötigten Kacheln
+        all_points = []
+        
+        for tile in tiles:
+            try:
+                points = self._download_dgm_tile(tile)
+                if points:
+                    all_points.extend(points)
+            except Exception as e:
+                self.logger.warning(f"Fehler beim Download der Kachel {tile}: {e}")
+        
+        if all_points:
+            # Konvertiere XYZ-Punkte zu GeoTIFF
+            return self._xyz_to_geotiff(all_points, bbox, output_file)
+        else:
+            return self._create_synthetic_terrain(bbox, output_file)
+    
+    def _calculate_dgm_tiles(self, bbox: Tuple[float, float, float, float]) -> List[str]:
+        """
+        Berechnet welche DGM-Kacheln für die Bounding Box benötigt werden
+        
+        Args:
+            bbox: Bounding Box in EPSG:25832
+        
+        Returns:
+            Liste von Kachel-IDs
+        """
+        min_x, min_y, max_x, max_y = bbox
+        
+        # DGM1 Kacheln sind 1km x 1km groß
+        # Kachel-ID Format: dgm1_32xxx_yyyy_1_nw.xyz
+        tiles = []
+        
+        # Runde auf Kilometer
+        start_x = int(min_x / 1000)
+        end_x = int(max_x / 1000) + 1
+        start_y = int(min_y / 1000)
+        end_y = int(max_y / 1000) + 1
+        
+        for x in range(start_x, end_x):
+            for y in range(start_y, end_y):
+                tile_name = f"dgm1_32{x:03d}_{y:04d}_1_nw.xyz"
+                tiles.append(tile_name)
+        
+        self.logger.info(f"Benötige {len(tiles)} DGM-Kacheln")
+        return tiles
+    
+    def _download_dgm_tile(self, tile_name: str) -> List[Tuple[float, float, float]]:
+        """
+        Lädt eine einzelne DGM-Kachel
+        
+        Args:
+            tile_name: Name der Kachel
+        
+        Returns:
+            Liste von (x, y, z) Punkten
+        """
+        url = f"{self.DGM_BASE_URL}{tile_name}"
         
         try:
-            self.logger.debug(f"WCS Request URL: {url}")
-            response = requests.get(url, timeout=60)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
             
-            # Speichere GeoTIFF
-            with open(output_file, 'wb') as f:
-                f.write(response.content)
+            # Parse XYZ Format
+            points = []
+            for line in response.text.strip().split('\n'):
+                parts = line.strip().split()
+                if len(parts) == 3:
+                    x, y, z = map(float, parts)
+                    points.append((x, y, z))
             
-            self.logger.info(f"Geländedaten gespeichert: {output_file}")
+            self.logger.debug(f"Kachel {tile_name}: {len(points)} Punkte geladen")
+            return points
             
-            # Validiere die Datei
-            with rasterio.open(output_file) as src:
-                self.logger.debug(f"GeoTIFF Info - CRS: {src.crs}, Bounds: {src.bounds}, Shape: {src.shape}")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Download von {tile_name}: {e}")
+            return []
+    
+    def _xyz_to_geotiff(self, points: List[Tuple[float, float, float]], 
+                       bbox: Tuple[float, float, float, float],
+                       output_file: Path) -> Path:
+        """
+        Konvertiert XYZ-Punkte zu GeoTIFF
+        
+        Args:
+            points: Liste von (x, y, z) Punkten
+            bbox: Bounding Box
+            output_file: Ausgabedatei
+        
+        Returns:
+            Path zur GeoTIFF-Datei
+        """
+        self.logger.info(f"Konvertiere {len(points)} Punkte zu GeoTIFF")
+        
+        # Erstelle Arrays
+        points_array = np.array(points)
+        x_coords = points_array[:, 0]
+        y_coords = points_array[:, 1]
+        z_coords = points_array[:, 2]
+        
+        # Bestimme Grid-Größe (1m Auflösung)
+        min_x, min_y, max_x, max_y = bbox
+        width = int(max_x - min_x) + 1
+        height = int(max_y - min_y) + 1
+        
+        # Erstelle leeres Grid
+        grid = np.full((height, width), np.nan, dtype=np.float32)
+        
+        # Fülle Grid mit Punkten
+        for x, y, z in points:
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                col = int(x - min_x)
+                row = height - 1 - int(y - min_y)  # Y-Achse invertieren
+                if 0 <= row < height and 0 <= col < width:
+                    grid[row, col] = z
+        
+        # Interpoliere fehlende Werte
+        from scipy.interpolate import griddata
+        
+        # Erstelle Maske für gültige Werte
+        valid_mask = ~np.isnan(grid)
+        if np.sum(valid_mask) > 0:
+            # Erstelle Koordinaten-Grid
+            rows, cols = np.meshgrid(range(height), range(width), indexing='ij')
             
-            return output_file
+            # Extrahiere gültige Punkte
+            valid_points = np.column_stack([rows[valid_mask], cols[valid_mask]])
+            valid_values = grid[valid_mask]
             
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Fehler beim Download der Geländedaten: {e}")
-            # Fallback: Erstelle synthetisches flaches Terrain
-            return self._create_synthetic_terrain(bbox, output_file)
+            # Interpoliere
+            grid_filled = griddata(valid_points, valid_values, 
+                                 (rows, cols), method='linear')
+            
+            # Fülle verbleibende NaN mit nearest neighbor
+            remaining_nan = np.isnan(grid_filled)
+            if np.any(remaining_nan):
+                grid_filled[remaining_nan] = griddata(valid_points, valid_values,
+                                                    (rows[remaining_nan], cols[remaining_nan]),
+                                                    method='nearest')
+        else:
+            # Fallback: konstante Höhe
+            grid_filled = np.full_like(grid, 50.0)
+        
+        # Erstelle GeoTIFF
+        transform = rasterio.transform.from_bounds(
+            min_x, min_y, max_x, max_y,
+            width, height
+        )
+        
+        with rasterio.open(
+            output_file,
+            'w',
+            driver='GTiff',
+            height=height,
+            width=width,
+            count=1,
+            dtype=grid_filled.dtype,
+            crs='EPSG:25832',
+            transform=transform
+        ) as dst:
+            dst.write(grid_filled, 1)
+        
+        self.logger.info(f"Geländedaten gespeichert: {output_file}")
+        return output_file
     
     def _create_synthetic_terrain(self, bbox: Tuple[float, float, float, float], output_file: Path) -> Path:
         """Erstellt ein synthetisches flaches Terrain als Fallback"""
@@ -131,7 +269,7 @@ class DataDownloader:
     
     def download_buildings(self, bbox: Tuple[float, float, float, float]) -> List[Path]:
         """
-        Lädt LOD2 Gebäudedaten (CityGML) vom WFS Service
+        Lädt LOD2 Gebäudedaten (CityGML) von OpenGeoData NRW
         
         Args:
             bbox: (min_x, min_y, max_x, max_y) in EPSG:25832
@@ -141,55 +279,86 @@ class DataDownloader:
         """
         self.logger.info("Lade Gebäudedaten (LOD2 CityGML)...")
         
-        # WFS GetFeature Request
-        bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]},EPSG:25832"
+        # Berechne benötigte Kacheln
+        tiles = self._calculate_lod2_tiles(bbox)
         
-        params = {
-            'SERVICE': 'WFS',
-            'VERSION': '2.0.0',
-            'REQUEST': 'GetFeature',
-            'TYPENAMES': 'ms:gebaeude_lod2',
-            'BBOX': bbox_str,
-            'OUTPUTFORMAT': 'application/gml+xml; version=3.2',
-            'SRSNAME': 'EPSG:25832'
-        }
+        if not tiles:
+            self.logger.warning("Keine LOD2-Kacheln für diese Bounding Box gefunden")
+            return self._create_empty_citygml(self.buildings_dir / "empty.gml")
         
-        output_file = self.buildings_dir / "buildings.gml"
+        downloaded_files = []
+        
+        for tile in tiles:
+            try:
+                file_path = self._download_lod2_tile(tile)
+                if file_path:
+                    downloaded_files.append(file_path)
+            except Exception as e:
+                self.logger.warning(f"Fehler beim Download der Kachel {tile}: {e}")
+        
+        if not downloaded_files:
+            return self._create_empty_citygml(self.buildings_dir / "empty.gml")
+        
+        return downloaded_files
+    
+    def _calculate_lod2_tiles(self, bbox: Tuple[float, float, float, float]) -> List[str]:
+        """
+        Berechnet welche LOD2-Kacheln für die Bounding Box benötigt werden
+        
+        Args:
+            bbox: Bounding Box in EPSG:25832
+        
+        Returns:
+            Liste von Kachel-Namen
+        """
+        min_x, min_y, max_x, max_y = bbox
+        
+        # LOD2 Kacheln sind 1km x 1km groß
+        # Format: LoD2_32{xxx}_{yyyy}_1_NW.gml
+        tiles = []
+        
+        # Runde auf Kilometer
+        start_x = int(min_x / 1000)
+        end_x = int(max_x / 1000) + 1
+        start_y = int(min_y / 1000)
+        end_y = int(max_y / 1000) + 1
+        
+        for x in range(start_x, end_x):
+            for y in range(start_y, end_y):
+                tile_name = f"LoD2_32{x:03d}_{y:04d}_1_NW.gml"
+                tiles.append(tile_name)
+        
+        self.logger.info(f"Benötige {len(tiles)} LOD2-Kacheln")
+        return tiles
+    
+    def _download_lod2_tile(self, tile_name: str) -> Optional[Path]:
+        """
+        Lädt eine einzelne LOD2-Kachel
+        
+        Args:
+            tile_name: Name der Kachel
+        
+        Returns:
+            Path zur heruntergeladenen Datei oder None
+        """
+        url = f"{self.LOD2_BASE_URL}{tile_name}"
+        output_file = self.buildings_dir / tile_name
         
         try:
-            url = f"{self.WFS_BUILDINGS_URL}?{urlencode(params)}"
-            self.logger.debug(f"WFS Request URL: {url}")
-            
-            response = requests.get(url, timeout=120)
+            self.logger.debug(f"Lade LOD2-Kachel: {url}")
+            response = requests.get(url, timeout=60)
             response.raise_for_status()
             
-            # Speichere CityGML
+            # Speichere GML-Datei
             with open(output_file, 'wb') as f:
                 f.write(response.content)
             
-            self.logger.info(f"Gebäudedaten gespeichert: {output_file}")
+            self.logger.info(f"LOD2-Kachel gespeichert: {output_file}")
+            return output_file
             
-            # Teile große Dateien auf wenn nötig
-            return self._split_citygml_if_needed(output_file)
-            
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Fehler beim Download der Gebäudedaten: {e}")
-            # Erstelle leere Platzhalter-Datei
-            return self._create_empty_citygml(output_file)
-    
-    def _split_citygml_if_needed(self, citygml_file: Path) -> List[Path]:
-        """Teilt große CityGML-Dateien in kleinere Chunks auf"""
-        file_size = citygml_file.stat().st_size
-        
-        # Wenn Datei kleiner als 50MB, nicht aufteilen
-        if file_size < 50 * 1024 * 1024:
-            return [citygml_file]
-        
-        self.logger.info(f"Teile große CityGML-Datei auf ({file_size / 1024 / 1024:.1f} MB)...")
-        
-        # Hier würde die Aufteilungslogik implementiert werden
-        # Für jetzt geben wir nur die Original-Datei zurück
-        return [citygml_file]
+        except Exception as e:
+            self.logger.error(f"Fehler beim Download von {tile_name}: {e}")
+            return None
     
     def _create_empty_citygml(self, output_file: Path) -> List[Path]:
         """Erstellt eine leere CityGML-Datei als Platzhalter"""
@@ -218,7 +387,6 @@ class DataDownloader:
         self.logger.info("Lade OSM-Daten...")
         
         # Konvertiere EPSG:25832 zu WGS84 für Overpass API
-        from pyproj import Transformer
         transformer = Transformer.from_crs("EPSG:25832", "EPSG:4326", always_xy=True)
         
         # Transformiere Eckpunkte

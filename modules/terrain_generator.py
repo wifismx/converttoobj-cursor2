@@ -86,14 +86,26 @@ class TerrainGenerator:
             # Erstelle Mesh
             mesh = self._create_mesh_from_grid(x_coords, y_coords, z_coords)
             
+            # Prüfe ob Mesh gültig ist
+            if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+                self.logger.error("Mesh-Erstellung fehlgeschlagen")
+                # Erstelle ein einfaches Plane-Mesh als Fallback
+                mesh = self._create_fallback_mesh(src.bounds, np.mean(elevation))
+            
             if simplify and len(mesh.faces) > max_faces:
                 self.logger.info(f"Vereinfache Mesh von {len(mesh.faces)} auf max {max_faces} Faces")
-                mesh = mesh.simplify_quadric_decimation(max_faces)
+                try:
+                    mesh = mesh.simplify_quadric_decimation(max_faces)
+                except Exception as e:
+                    self.logger.warning(f"Mesh-Vereinfachung fehlgeschlagen: {e}")
             
-            # Bereinige das Mesh
-            mesh.remove_degenerate_faces()
-            mesh.remove_duplicate_faces()
-            mesh.remove_unreferenced_vertices()
+            # Bereinige das Mesh vorsichtig
+            try:
+                mesh.remove_degenerate_faces()
+                mesh.remove_duplicate_faces()
+                mesh.remove_unreferenced_vertices()
+            except Exception as e:
+                self.logger.warning(f"Mesh-Bereinigung fehlgeschlagen: {e}")
             
             self.logger.info(f"Terrain-Mesh erstellt: {len(mesh.vertices)} Vertices, {len(mesh.faces)} Faces")
             
@@ -105,7 +117,7 @@ class TerrainGenerator:
     
     def _create_mesh_from_grid(self, x_coords: np.ndarray, 
                               y_coords: np.ndarray, 
-                              z_coords: np.ndarray) -> trimesh.Trimesh:
+                              z_coords: np.ndarray) -> Optional[trimesh.Trimesh]:
         """
         Erstellt ein Trimesh aus Grid-Koordinaten
         
@@ -115,9 +127,13 @@ class TerrainGenerator:
             z_coords: 2D-Array mit Z-Koordinaten (Höhen)
         
         Returns:
-            Trimesh-Objekt
+            Trimesh-Objekt oder None
         """
         height, width = x_coords.shape
+        
+        if height < 2 or width < 2:
+            self.logger.error("Grid zu klein für Mesh-Erstellung")
+            return None
         
         # Erstelle Vertex-Liste
         vertices = []
@@ -141,12 +157,47 @@ class TerrainGenerator:
                 faces.append([v0, v1, v2])
                 faces.append([v1, v3, v2])
         
+        if len(faces) == 0:
+            self.logger.error("Keine Faces erstellt")
+            return None
+        
         faces = np.array(faces)
         
         # Erstelle Mesh
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+        try:
+            mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            return mesh
+        except Exception as e:
+            self.logger.error(f"Fehler bei Mesh-Erstellung: {e}")
+            return None
+    
+    def _create_fallback_mesh(self, bounds, mean_elevation: float) -> trimesh.Trimesh:
+        """
+        Erstellt ein einfaches Plane-Mesh als Fallback
         
-        return mesh
+        Args:
+            bounds: Rasterio bounds object
+            mean_elevation: Durchschnittliche Höhe
+        
+        Returns:
+            Trimesh-Objekt
+        """
+        self.logger.warning("Erstelle Fallback-Mesh")
+        
+        # Erstelle ein einfaches Rechteck
+        vertices = np.array([
+            [bounds.left, bounds.bottom, mean_elevation],
+            [bounds.right, bounds.bottom, mean_elevation],
+            [bounds.right, bounds.top, mean_elevation],
+            [bounds.left, bounds.top, mean_elevation]
+        ])
+        
+        faces = np.array([
+            [0, 1, 2],
+            [0, 2, 3]
+        ])
+        
+        return trimesh.Trimesh(vertices=vertices, faces=faces)
     
     def _create_interpolator(self, raster_src):
         """
