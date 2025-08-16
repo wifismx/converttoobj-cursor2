@@ -146,10 +146,16 @@ class MeshFinalizer:
         """
         self.logger.info("Validiere und repariere Mesh...")
         
-        # Basis-Validierung
-        is_valid = mesh.is_valid
-        is_watertight = mesh.is_watertight
-        is_winding_consistent = mesh.is_winding_consistent
+        # Basis-Validierung - prüfe ob Attribute existieren
+        try:
+            is_valid = mesh.is_valid if hasattr(mesh, 'is_valid') else True
+            is_watertight = mesh.is_watertight if hasattr(mesh, 'is_watertight') else False
+            is_winding_consistent = mesh.is_winding_consistent if hasattr(mesh, 'is_winding_consistent') else True
+        except Exception as e:
+            self.logger.warning(f"Fehler bei Mesh-Validierung: {e}")
+            is_valid = True
+            is_watertight = False
+            is_winding_consistent = True
         
         self.logger.info(f"  Gültig: {is_valid}")
         self.logger.info(f"  Wasserdicht: {is_watertight}")
@@ -165,7 +171,10 @@ class MeshFinalizer:
         # 1. Fixiere Normalen
         if not is_winding_consistent:
             self.logger.info("Fixiere Normalen-Orientierung...")
-            repaired.fix_normals()
+            try:
+                repaired.fix_normals()
+            except Exception as e:
+                self.logger.warning(f"Konnte Normalen nicht fixieren: {e}")
         
         # 2. Fülle Löcher
         if not is_watertight:
@@ -179,16 +188,26 @@ class MeshFinalizer:
         # 4. Vereinfache wenn zu komplex
         if len(repaired.faces) > 500000:
             self.logger.info(f"Vereinfache Mesh von {len(repaired.faces)} auf 500000 Faces...")
-            repaired = repaired.simplify_quadric_decimation(500000)
+            try:
+                repaired = repaired.simplify_quadric_decimation(500000)
+            except Exception as e:
+                self.logger.warning(f"Mesh-Vereinfachung fehlgeschlagen: {e}")
         
         # 5. Finale Bereinigung
-        repaired.remove_degenerate_faces()
-        repaired.remove_duplicate_faces()
-        repaired.remove_unreferenced_vertices()
+        try:
+            repaired.remove_degenerate_faces()
+            repaired.remove_duplicate_faces()
+            repaired.remove_unreferenced_vertices()
+        except Exception as e:
+            self.logger.warning(f"Mesh-Bereinigung fehlgeschlagen: {e}")
         
         # Finale Validierung
-        is_valid = repaired.is_valid
-        is_watertight = repaired.is_watertight
+        try:
+            is_valid = repaired.is_valid if hasattr(repaired, 'is_valid') else True
+            is_watertight = repaired.is_watertight if hasattr(repaired, 'is_watertight') else False
+        except:
+            is_valid = True
+            is_watertight = False
         
         self.logger.info(f"Nach Reparatur - Gültig: {is_valid}, Wasserdicht: {is_watertight}")
         
@@ -347,17 +366,37 @@ illum 2
             Dictionary mit Statistiken
         """
         stats = {
-            'vertices': len(mesh.vertices),
-            'faces': len(mesh.faces),
-            'edges': len(mesh.edges),
-            'is_watertight': mesh.is_watertight,
-            'is_valid': mesh.is_valid,
-            'is_winding_consistent': mesh.is_winding_consistent,
-            'volume': float(mesh.volume) if mesh.is_watertight else None,
-            'surface_area': float(mesh.area),
-            'bbox': mesh.bounds.tolist() if mesh.bounds is not None else None,
-            'extents': mesh.extents.tolist() if mesh.extents is not None else None
+            'vertices': len(mesh.vertices) if hasattr(mesh, 'vertices') else 0,
+            'faces': len(mesh.faces) if hasattr(mesh, 'faces') else 0,
+            'edges': len(mesh.edges) if hasattr(mesh, 'edges') else 0,
+            'is_watertight': False,
+            'is_valid': False,
+            'is_winding_consistent': False,
+            'volume': None,
+            'surface_area': None,
+            'bbox': None,
+            'extents': None
         }
+        
+        try:
+            stats['is_watertight'] = mesh.is_watertight if hasattr(mesh, 'is_watertight') else False
+            stats['is_valid'] = mesh.is_valid if hasattr(mesh, 'is_valid') else False
+            stats['is_winding_consistent'] = mesh.is_winding_consistent if hasattr(mesh, 'is_winding_consistent') else False
+            
+            if hasattr(mesh, 'volume') and stats['is_watertight']:
+                stats['volume'] = float(mesh.volume)
+            
+            if hasattr(mesh, 'area'):
+                stats['surface_area'] = float(mesh.area)
+            
+            if hasattr(mesh, 'bounds') and mesh.bounds is not None:
+                stats['bbox'] = mesh.bounds.tolist()
+            
+            if hasattr(mesh, 'extents') and mesh.extents is not None:
+                stats['extents'] = mesh.extents.tolist()
+                
+        except Exception as e:
+            self.logger.warning(f"Fehler beim Berechnen der Statistiken: {e}")
         
         return stats
     

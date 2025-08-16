@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Tuple, Optional
 import json
+from pyproj import Transformer
 
 from modules.data_downloader import DataDownloader
 from modules.data_processor import DataProcessor
@@ -31,14 +32,46 @@ def setup_logging(verbose: bool = False):
 
 def parse_bbox(bbox_str: str) -> Tuple[float, float, float, float]:
     """
-    Parse Bounding Box String
+    Parse Bounding Box String und konvertiere ggf. von WGS84 zu EPSG:25832
     Format: "min_x,min_y,max_x,max_y"
     """
     try:
         coords = [float(x.strip()) for x in bbox_str.split(',')]
         if len(coords) != 4:
             raise ValueError("Bounding Box muss 4 Koordinaten haben")
-        return tuple(coords)
+        
+        min_x, min_y, max_x, max_y = coords
+        
+        # Prüfe ob Koordinaten in WGS84 sind (typisch: -180 bis 180 für Länge, -90 bis 90 für Breite)
+        # NRW liegt etwa bei 6-9°E und 50-52°N
+        if -180 <= min_x <= 180 and -90 <= min_y <= 90 and -180 <= max_x <= 180 and -90 <= max_y <= 90:
+            # Wahrscheinlich WGS84 - konvertiere zu EPSG:25832
+            logging.getLogger(__name__).warning("Koordinaten scheinen in WGS84 zu sein, konvertiere zu EPSG:25832...")
+            
+            transformer = Transformer.from_crs("EPSG:4326", "EPSG:25832", always_xy=True)
+            
+            # Konvertiere alle vier Ecken
+            min_x_utm, min_y_utm = transformer.transform(min_x, min_y)
+            max_x_utm, max_y_utm = transformer.transform(max_x, max_y)
+            
+            # Stelle sicher dass min/max korrekt sind
+            if min_x_utm > max_x_utm:
+                min_x_utm, max_x_utm = max_x_utm, min_x_utm
+            if min_y_utm > max_y_utm:
+                min_y_utm, max_y_utm = max_y_utm, min_y_utm
+            
+            logging.getLogger(__name__).info(f"Konvertiert zu EPSG:25832: {min_x_utm:.2f},{min_y_utm:.2f},{max_x_utm:.2f},{max_y_utm:.2f}")
+            
+            return (min_x_utm, min_y_utm, max_x_utm, max_y_utm)
+        
+        # Prüfe ob Koordinaten plausibel für EPSG:25832 sind
+        # NRW liegt etwa zwischen 280000-450000 (X) und 5600000-5800000 (Y)
+        if min_x < 100000 or max_x < 100000 or min_y < 1000000 or max_y < 1000000:
+            logging.getLogger(__name__).warning(f"Koordinaten scheinen nicht in EPSG:25832 zu sein: {coords}")
+            logging.getLogger(__name__).warning("Falls es WGS84-Koordinaten sind, verwenden Sie das Format: lon_min,lat_min,lon_max,lat_max")
+        
+        return (min_x, min_y, max_x, max_y)
+        
     except Exception as e:
         raise ValueError(f"Ungültiges Bounding Box Format: {e}")
 
@@ -51,7 +84,7 @@ def main():
     parser.add_argument(
         'bbox',
         type=str,
-        help='Bounding Box im Format: min_x,min_y,max_x,max_y (EPSG:25832)'
+        help='Bounding Box im Format: min_x,min_y,max_x,max_y (EPSG:25832 oder WGS84)'
     )
     
     parser.add_argument(
@@ -131,12 +164,26 @@ def main():
             logger.error(f"Fehler beim Laden der Konfiguration: {e}")
             sys.exit(1)
     
-    # Bounding Box parsen
+    # Bounding Box parsen (mit automatischer WGS84-Konvertierung)
     try:
         bbox = parse_bbox(config['bbox'])
-        logger.info(f"Bounding Box: {bbox}")
+        logger.info(f"Bounding Box (EPSG:25832): {bbox}")
+        
+        # Berechne und zeige Größe
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        area = width * height / 1000000  # in km²
+        logger.info(f"Bereich: {width:.0f}m x {height:.0f}m = {area:.2f} km²")
+        
+        if area > 10:
+            logger.warning("Großer Bereich gewählt (>10 km²) - dies kann zu Speicherproblemen führen")
+            
     except ValueError as e:
         logger.error(str(e))
+        logger.info("\nHinweis: Sie können WGS84-Koordinaten (Länge/Breite) verwenden:")
+        logger.info("  Beispiel: python nrw_3d_generator.py \"6.95,50.94,6.96,50.95\"")
+        logger.info("\nOder EPSG:25832-Koordinaten (UTM):")
+        logger.info("  Beispiel: python nrw_3d_generator.py \"356800,5645200,357800,5646200\"")
         sys.exit(1)
     
     # Arbeitsverzeichnis erstellen
@@ -160,12 +207,12 @@ def main():
             osm_files = downloader.download_osm_data(bbox)
         else:
             logger.info("Download übersprungen - nutze existierende Daten")
-            terrain_file = work_dir / "raw" / "gelaende.tif"
+            terrain_file = work_dir / "raw" / "terrain" / "gelaende.tif"
             building_files = list((work_dir / "raw" / "buildings").glob("*.gml"))
             osm_files = {
-                'streets': work_dir / "raw" / "strassen.geojson",
-                'water': work_dir / "raw" / "gewaesser.geojson",
-                'vegetation': work_dir / "raw" / "vegetation.geojson"
+                'streets': work_dir / "raw" / "osm" / "strassen.geojson",
+                'water': work_dir / "raw" / "osm" / "gewaesser.geojson",
+                'vegetation': work_dir / "raw" / "osm" / "vegetation.geojson"
             }
         
         # Phase 2: Datenverarbeitung
@@ -253,7 +300,8 @@ def main():
         logger.info("=== Modell-Statistiken ===")
         logger.info(f"Vertices: {stats['vertices']:,}")
         logger.info(f"Faces: {stats['faces']:,}")
-        logger.info(f"Bounding Box: {stats['bbox']}")
+        if stats['bbox']:
+            logger.info(f"Bounding Box: {stats['bbox']}")
         logger.info(f"Wasserdicht: {'Ja' if stats['is_watertight'] else 'Nein'}")
         
     except Exception as e:

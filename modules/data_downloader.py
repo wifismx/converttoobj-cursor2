@@ -97,6 +97,13 @@ class DataDownloader:
         """
         min_x, min_y, max_x, max_y = bbox
         
+        # Prüfe ob Koordinaten plausibel sind (EPSG:25832 für NRW)
+        # NRW liegt etwa zwischen 280000-450000 (X) und 5600000-5800000 (Y)
+        if min_x < 100 or max_x < 100 or min_y < 100 or max_y < 100:
+            self.logger.error(f"Koordinaten scheinen nicht in EPSG:25832 zu sein: {bbox}")
+            self.logger.error("Bitte verwenden Sie 'python convert_coordinates.py' zur Konvertierung von WGS84")
+            return []
+        
         # DGM1 Kacheln sind 1km x 1km groß
         # Kachel-ID Format: dgm1_32xxx_yyyy_1_nw.xyz
         tiles = []
@@ -312,6 +319,12 @@ class DataDownloader:
             Liste von Kachel-Namen
         """
         min_x, min_y, max_x, max_y = bbox
+        
+        # Prüfe ob Koordinaten plausibel sind (EPSG:25832 für NRW)
+        if min_x < 100 or max_x < 100 or min_y < 100 or max_y < 100:
+            self.logger.error(f"Koordinaten scheinen nicht in EPSG:25832 zu sein: {bbox}")
+            self.logger.error("Bitte verwenden Sie 'python convert_coordinates.py' zur Konvertierung von WGS84")
+            return []
         
         # LOD2 Kacheln sind 1km x 1km groß
         # Format: LoD2_32{xxx}_{yyyy}_1_NW.gml
