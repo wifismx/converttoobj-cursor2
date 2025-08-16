@@ -1,0 +1,11 @@
+{
+    "bbox": "356800,5645200,357800,5646200",
+    "output": "koeln_dom.obj",
+    "workdir": "./work",
+    "terrain_resolution": 2.0,
+    "road_thickness": 0.3,
+    "foundation_depth": 15.0,
+    "skip_download": false,
+    "skip_validation": false,
+    "verbose": true
+}
